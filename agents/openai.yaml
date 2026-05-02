@@ -1,0 +1,4 @@
+interface:
+  display_name: "CCC Collaboration"
+  short_description: "Codex-led collaboration with CC"
+  default_prompt: "Use $ccc-collaboration to keep Codex in the lead and use Claude Code as a reviewer or challenger."

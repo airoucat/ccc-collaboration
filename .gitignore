@@ -1,0 +1,6 @@
+.runtime/
+*.log
+*.tmp
+*.bak
+.DS_Store
+Thumbs.db
