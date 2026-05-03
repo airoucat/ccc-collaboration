@@ -32,6 +32,8 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$script:OutputPath = $null
+$script:OutputPathPrinted = $false
 
 function Resolve-WorkspacePath {
   param([string]$Path)
@@ -72,6 +74,25 @@ function Get-ScriptRoot {
   return Split-Path -Parent $MyInvocation.MyCommand.Path
 }
 
+function Initialize-OutputPath {
+  param([string]$RequestedPath)
+
+  if ([string]::IsNullOrWhiteSpace($RequestedPath)) {
+    $timestamp = (Get-Date).ToUniversalTime().ToString("yyyyMMdd-HHmmss")
+    $runtimeDir = Join-Path (Split-Path -Parent (Get-ScriptRoot)) ".runtime"
+    New-Item -ItemType Directory -Force -Path $runtimeDir | Out-Null
+    return (Join-Path $runtimeDir "$timestamp.md")
+  }
+
+  $fullPath = [System.IO.Path]::GetFullPath($RequestedPath)
+  $outputParent = Split-Path -Parent $fullPath
+  if ($outputParent) {
+    New-Item -ItemType Directory -Force -Path $outputParent | Out-Null
+  }
+
+  return $fullPath
+}
+
 function Import-ClaudeSettingsEnv {
   $settingsPath = Join-Path $HOME ".claude\settings.json"
   if (-not (Test-Path -LiteralPath $settingsPath -PathType Leaf)) {
@@ -89,6 +110,15 @@ function Import-ClaudeSettingsEnv {
 
   if ($settings.env.ANTHROPIC_AUTH_TOKEN) {
     Remove-Item Env:ANTHROPIC_API_KEY -ErrorAction SilentlyContinue
+  }
+}
+
+function Write-OutputPath {
+  param([string]$Path)
+
+  if (-not $script:OutputPathPrinted -and -not [string]::IsNullOrWhiteSpace($Path)) {
+    Write-Output "output_path=$([System.IO.Path]::GetFullPath($Path))"
+    $script:OutputPathPrinted = $true
   }
 }
 
@@ -132,6 +162,48 @@ function Write-OutputMarkdown {
   $markdown -join "`n" | Set-Content -Encoding UTF8 -LiteralPath $Path
 }
 
+function Get-OutputStatus {
+  param([string]$Path)
+
+  if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+    return ""
+  }
+
+  $statusLine = Get-Content -LiteralPath $Path -TotalCount 8 |
+    Where-Object { $_ -match "^\*\*Status\*\*: " } |
+    Select-Object -First 1
+
+  if ($statusLine -match "^\*\*Status\*\*: (.+)$") {
+    return $Matches[1].Trim()
+  }
+
+  return ""
+}
+
+function Remove-InvocationJob {
+  param([System.Management.Automation.Job]$Job)
+
+  if (-not $Job) {
+    return
+  }
+
+  try {
+    if ($Job.State -in @("NotStarted", "Running")) {
+      Stop-Job -Job $Job -ErrorAction SilentlyContinue
+    }
+  }
+  catch {
+    # Cleanup must not mask the real invocation result.
+  }
+
+  try {
+    Remove-Job -Job $Job -ErrorAction SilentlyContinue
+  }
+  catch {
+    # PowerShell hosts differ in job cleanup parameters; avoid -Force.
+  }
+}
+
 function Invoke-ClaudeJson {
   param(
     [string]$WorkspaceRoot,
@@ -155,20 +227,38 @@ function Invoke-ClaudeJson {
 
   $completed = Wait-Job $job -Timeout $TimeoutSeconds
   if (-not $completed) {
-    Stop-Job $job -Force
-    Remove-Job $job -Force
+    Remove-InvocationJob -Job $job
     return [pscustomobject]@{
       TimedOut = $true
       Raw = @()
       ExitCode = $null
       Result = $null
       JsonLine = $null
+      WrapperError = $null
     }
   }
 
-  $jobRaw = Receive-Job $job
-  Remove-Job $job -Force
-  $payload = ($jobRaw | Out-String).Trim() | ConvertFrom-Json
+  try {
+    $jobRaw = Receive-Job $job -ErrorAction Stop
+  }
+  finally {
+    Remove-InvocationJob -Job $job
+  }
+
+  try {
+    $payload = ($jobRaw | Out-String).Trim() | ConvertFrom-Json
+  }
+  catch {
+    return [pscustomobject]@{
+      TimedOut = $false
+      Raw = @($jobRaw)
+      ExitCode = $null
+      Result = $null
+      JsonLine = $null
+      WrapperError = "$_"
+    }
+  }
+
   $raw = @($payload.Raw)
   $jsonLine = $raw | Where-Object { $_ -match "^\s*\{" } | Select-Object -Last 1
 
@@ -179,6 +269,7 @@ function Invoke-ClaudeJson {
       ExitCode = $payload.ExitCode
       Result = $null
       JsonLine = $null
+      WrapperError = $null
     }
   }
 
@@ -188,6 +279,7 @@ function Invoke-ClaudeJson {
     ExitCode = $payload.ExitCode
     Result = ($jsonLine | ConvertFrom-Json)
     JsonLine = $jsonLine
+    WrapperError = $null
   }
 }
 
@@ -204,178 +296,196 @@ function Test-PlanPlaceholderResponse {
   )
 }
 
-if ([string]::IsNullOrWhiteSpace($Task)) {
-  if ($MyInvocation.ExpectingInput) {
+try {
+  if ([string]::IsNullOrWhiteSpace($Task) -and $MyInvocation.ExpectingInput) {
     $Task = ($input | Out-String)
   }
-}
 
-if ([string]::IsNullOrWhiteSpace($Task)) {
-  throw "Task text is empty. Pass a positional task string or pipe text into the script."
-}
-
-if ($TimeoutSeconds -lt 30) {
-  throw "TimeoutSeconds must be at least 30."
-}
-
-if (-not $NoSettingsEnv) {
-  Import-ClaudeSettingsEnv
-}
-
-$workspaceRoot = Resolve-WorkspacePath $Workspace
-if (-not (Test-Path -LiteralPath $workspaceRoot -PathType Container)) {
-  throw "Workspace does not exist: $workspaceRoot"
-}
-
-$prompt = $Task.Trim()
-
-if ($ReadOnly) {
-  $prompt += "`n`nMode constraint: read-only. Do not edit files. Provide analysis, critique, or recommendations only."
-}
-
-if ($File.Count -gt 0) {
-  $prompt += "`n`nPriority files to inspect first:"
-  foreach ($item in $File) {
-    $resolved = Resolve-ContextPath -WorkspaceRoot $workspaceRoot -Path $item
-    $status = if (Test-Path -LiteralPath $resolved) { "exists" } else { "missing" }
-    $prompt += "`n- $resolved ($status)"
+  if ([string]::IsNullOrWhiteSpace($Task)) {
+    throw "Task text is empty. Pass a positional task string or pipe text into the script."
   }
-}
 
-if (-not $Output) {
-  $timestamp = (Get-Date).ToUniversalTime().ToString("yyyyMMdd-HHmmss")
-  $runtimeDir = Join-Path (Split-Path -Parent (Get-ScriptRoot)) ".runtime"
-  New-Item -ItemType Directory -Force -Path $runtimeDir | Out-Null
-  $Output = Join-Path $runtimeDir "$timestamp.md"
-}
-else {
-  $outputParent = Split-Path -Parent ([System.IO.Path]::GetFullPath($Output))
-  if ($outputParent) {
-    New-Item -ItemType Directory -Force -Path $outputParent | Out-Null
+  if ($TimeoutSeconds -lt 30) {
+    throw "TimeoutSeconds must be at least 30."
   }
-}
 
-Write-OutputMarkdown `
-  -Path $Output `
-  -SessionId "" `
-  -ModelName $Model `
-  -EffortLevel $Effort `
-  -Permission "" `
-  -IsReadOnly $ReadOnly.IsPresent `
-  -Body "Claude Code invocation is still running. If this file remains unchanged, the parent process was interrupted before completion." `
-  -ModelUsage $null `
-  -Status "RUNNING"
+  $script:OutputPath = Initialize-OutputPath -RequestedPath $Output
 
-$claudeCommand = (Get-Command claude -ErrorAction Stop).Source
+  Write-OutputMarkdown `
+    -Path $script:OutputPath `
+    -SessionId "" `
+    -ModelName $Model `
+    -EffortLevel $Effort `
+    -Permission "" `
+    -IsReadOnly $ReadOnly.IsPresent `
+    -Body "Claude Code invocation is still running. If this file remains unchanged, the parent process was interrupted before completion." `
+    -ModelUsage $null `
+    -Status "RUNNING"
 
-$claudeArgs = @(
-  "-p",
-  "--output-format", "json",
-  "--model", $Model,
-  "--effort", $Effort
-)
-
-if ($Bare) {
-  $claudeArgs += "--bare"
-}
-
-$permissionModeExplicit = $PSBoundParameters.ContainsKey("PermissionMode")
-$effectivePermissionMode = $PermissionMode
-
-if (-not $permissionModeExplicit -and $ReadOnly) {
-  $effectivePermissionMode = "default"
-}
-
-if (-not [string]::IsNullOrWhiteSpace($effectivePermissionMode)) {
-  $claudeArgs += @("--permission-mode", $effectivePermissionMode)
-}
-
-if ($Session) {
-  $claudeArgs += @("--resume", $Session)
-}
-
-$claudeArgs += $prompt
-
-$invoke = Invoke-ClaudeJson `
-  -WorkspaceRoot $workspaceRoot `
-  -ClaudeCommand $claudeCommand `
-  -ClaudeArgs $claudeArgs `
-  -TimeoutSeconds $TimeoutSeconds
-
-if (
-  $ReadOnly -and
-  -not $permissionModeExplicit -and
-  $effectivePermissionMode -eq "default" -and
-  $invoke.Result -and
-  (Test-PlanPlaceholderResponse -Result $invoke.Result)
-) {
-  $fallbackArgs = @($claudeArgs)
-  $permissionIndex = [Array]::IndexOf($fallbackArgs, "--permission-mode")
-  if ($permissionIndex -ge 0 -and ($permissionIndex + 1) -lt $fallbackArgs.Length) {
-    $fallbackArgs[$permissionIndex + 1] = "dontAsk"
+  if (-not $NoSettingsEnv) {
+    Import-ClaudeSettingsEnv
   }
+
+  $workspaceRoot = Resolve-WorkspacePath $Workspace
+  if (-not (Test-Path -LiteralPath $workspaceRoot -PathType Container)) {
+    throw "Workspace does not exist: $workspaceRoot"
+  }
+
+  $prompt = $Task.Trim()
+
+  if ($ReadOnly) {
+    $prompt += "`n`nMode constraint: read-only. Do not edit files. Provide analysis, critique, or recommendations only."
+  }
+
+  if ($File.Count -gt 0) {
+    $prompt += "`n`nPriority files to inspect first:"
+    foreach ($item in $File) {
+      $resolved = Resolve-ContextPath -WorkspaceRoot $workspaceRoot -Path $item
+      $status = if (Test-Path -LiteralPath $resolved) { "exists" } else { "missing" }
+      $prompt += "`n- $resolved ($status)"
+    }
+  }
+
+  $claudeCommand = (Get-Command claude -ErrorAction Stop).Source
+
+  $claudeArgs = @(
+    "-p",
+    "--output-format", "json",
+    "--model", $Model,
+    "--effort", $Effort
+  )
+
+  if ($Bare) {
+    $claudeArgs += "--bare"
+  }
+
+  $permissionModeExplicit = $PSBoundParameters.ContainsKey("PermissionMode")
+  $effectivePermissionMode = $PermissionMode
+
+  if (-not $permissionModeExplicit -and $ReadOnly) {
+    $effectivePermissionMode = "default"
+  }
+
+  if (-not [string]::IsNullOrWhiteSpace($effectivePermissionMode)) {
+    $claudeArgs += @("--permission-mode", $effectivePermissionMode)
+  }
+
+  if ($Session) {
+    $claudeArgs += @("--resume", $Session)
+  }
+
+  $claudeArgs += $prompt
 
   $invoke = Invoke-ClaudeJson `
     -WorkspaceRoot $workspaceRoot `
     -ClaudeCommand $claudeCommand `
-    -ClaudeArgs $fallbackArgs `
+    -ClaudeArgs $claudeArgs `
     -TimeoutSeconds $TimeoutSeconds
 
-  $effectivePermissionMode = "dontAsk"
-}
+  if (
+    $ReadOnly -and
+    -not $permissionModeExplicit -and
+    $effectivePermissionMode -eq "default" -and
+    $invoke.Result -and
+    (Test-PlanPlaceholderResponse -Result $invoke.Result)
+  ) {
+    $fallbackArgs = @($claudeArgs)
+    $permissionIndex = [Array]::IndexOf($fallbackArgs, "--permission-mode")
+    if ($permissionIndex -ge 0 -and ($permissionIndex + 1) -lt $fallbackArgs.Length) {
+      $fallbackArgs[$permissionIndex + 1] = "dontAsk"
+    }
 
-if ($invoke.TimedOut) {
+    $invoke = Invoke-ClaudeJson `
+      -WorkspaceRoot $workspaceRoot `
+      -ClaudeCommand $claudeCommand `
+      -ClaudeArgs $fallbackArgs `
+      -TimeoutSeconds $TimeoutSeconds
+
+    $effectivePermissionMode = "dontAsk"
+  }
+
+  if ($invoke.TimedOut) {
+    Write-OutputMarkdown `
+      -Path $script:OutputPath `
+      -SessionId "" `
+      -ModelName $Model `
+      -EffortLevel $Effort `
+      -Permission $effectivePermissionMode `
+      -IsReadOnly $ReadOnly.IsPresent `
+      -Body "Claude Code timed out after $TimeoutSeconds seconds. Increase -TimeoutSeconds or reduce the request scope." `
+      -ModelUsage $null `
+      -Status "TIMEOUT"
+
+    Write-OutputPath -Path $script:OutputPath
+    throw "Claude Code timed out after $TimeoutSeconds seconds. Output was written to $script:OutputPath"
+  }
+
+  if (-not $invoke.JsonLine) {
+    $rawBody = ($invoke.Raw -join "`n")
+    if ($invoke.WrapperError) {
+      $rawBody += "`n`nWrapper parse error:`n$($invoke.WrapperError)"
+    }
+
+    Write-OutputMarkdown `
+      -Path $script:OutputPath `
+      -SessionId "" `
+      -ModelName $Model `
+      -EffortLevel $Effort `
+      -Permission $effectivePermissionMode `
+      -IsReadOnly $ReadOnly.IsPresent `
+      -Body "Claude Code did not return JSON.`n`nRaw output:`n`n``````text`n$rawBody`n``````" `
+      -ModelUsage $null `
+      -Status "NO_JSON"
+
+    Write-OutputPath -Path $script:OutputPath
+    throw "Claude Code did not return JSON. Raw output was written to $script:OutputPath"
+  }
+
+  $result = $invoke.Result
+  $finalStatus = if ($result.is_error -or $invoke.ExitCode -ne 0) { "ERROR" } else { "OK" }
+  $body = "$($result.result)"
+  if ($invoke.ExitCode -ne 0) {
+    $body += "`n`nClaude Code exited with code $($invoke.ExitCode)."
+  }
+
   Write-OutputMarkdown `
-    -Path $Output `
-    -SessionId "" `
+    -Path $script:OutputPath `
+    -SessionId $result.session_id `
     -ModelName $Model `
     -EffortLevel $Effort `
     -Permission $effectivePermissionMode `
     -IsReadOnly $ReadOnly.IsPresent `
-    -Body "Claude Code timed out after $TimeoutSeconds seconds. Increase -TimeoutSeconds or reduce the request scope." `
-    -ModelUsage $null `
-    -Status "TIMEOUT"
+    -Body $body `
+    -ModelUsage $result.modelUsage `
+    -Status $finalStatus
 
-  Write-Output "output_path=$([System.IO.Path]::GetFullPath($Output))"
-  throw "Claude Code timed out after $TimeoutSeconds seconds. Output was written to $Output"
+  if ($result.session_id) {
+    Write-Output "session_id=$($result.session_id)"
+  }
+  Write-OutputPath -Path $script:OutputPath
+
+  if ($invoke.ExitCode -ne 0) {
+    throw "Claude Code exited with code $($invoke.ExitCode). Output was written to $script:OutputPath"
+  }
 }
+catch {
+  if (-not [string]::IsNullOrWhiteSpace($script:OutputPath)) {
+    $terminalStatus = Get-OutputStatus -Path $script:OutputPath
+    if ($terminalStatus -notin @("OK", "ERROR", "TIMEOUT", "NO_JSON")) {
+      Write-OutputMarkdown `
+        -Path $script:OutputPath `
+        -SessionId "" `
+        -ModelName $Model `
+        -EffortLevel $Effort `
+        -Permission "" `
+        -IsReadOnly $ReadOnly.IsPresent `
+        -Body "Wrapper failed before producing a terminal Claude Code result.`n`nError:`n`n``````text`n$_`n``````" `
+        -ModelUsage $null `
+        -Status "ERROR"
+    }
 
-if (-not $invoke.JsonLine) {
-  $rawBody = ($invoke.Raw -join "`n")
-  Write-OutputMarkdown `
-    -Path $Output `
-    -SessionId "" `
-    -ModelName $Model `
-    -EffortLevel $Effort `
-    -Permission $effectivePermissionMode `
-    -IsReadOnly $ReadOnly.IsPresent `
-    -Body "Claude Code did not return JSON.`n`nRaw output:`n`n``````text`n$rawBody`n``````" `
-    -ModelUsage $null `
-    -Status "NO_JSON"
+    Write-OutputPath -Path $script:OutputPath
+  }
 
-  Write-Output "output_path=$([System.IO.Path]::GetFullPath($Output))"
-  throw "Claude Code did not return JSON. Raw output was written to $Output"
+  throw
 }
-
-$result = $invoke.Result
-
-Write-OutputMarkdown `
-  -Path $Output `
-  -SessionId $result.session_id `
-  -ModelName $Model `
-  -EffortLevel $Effort `
-  -Permission $effectivePermissionMode `
-  -IsReadOnly $ReadOnly.IsPresent `
-  -Body "$($result.result)" `
-  -ModelUsage $result.modelUsage `
-  -Status $(if ($result.is_error) { "ERROR" } else { "OK" })
-
-if ($invoke.ExitCode -ne 0 -and -not $result.session_id) {
-  Write-Output "output_path=$([System.IO.Path]::GetFullPath($Output))"
-  throw "Claude Code exited with code $($invoke.ExitCode). Output was written to $Output"
-}
-
-if ($result.session_id) {
-  Write-Output "session_id=$($result.session_id)"
-}
-Write-Output "output_path=$([System.IO.Path]::GetFullPath($Output))"
