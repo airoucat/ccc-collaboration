@@ -148,6 +148,13 @@ powershell -ExecutionPolicy Bypass -File $HOME\.codex\skills\ccc-collaboration\s
 - `-Effort`：默认 `max`。
 - `-ReadOnly`：要求 CC 不改文件，只做分析。
 - `-Output`：指定输出 markdown 文件路径。
+- `-PermissionMode`：覆盖 Claude Code permission mode；默认 read-only 调用使用 `default`，避免误入 Claude 的 plan approval 占位回复。
+- `-TimeoutSeconds`：wrapper 内部超时，默认 `1800` 秒。
+- `-NoSettingsEnv`：不从 `$HOME\.claude\settings.json` 导入 Claude 环境变量，仅用于调试。
+
+wrapper 会在调用开始时先创建一个 `RUNNING` 输出文件，并在成功、超时或非 JSON 输出时改写它。这样即使 CC 调用很慢，也能看到当前状态。注意：如果外层工具自己的 timeout 比 `-TimeoutSeconds` 更短，外层仍然可能先杀掉进程；这种情况下请调大外层 timeout。
+
+默认情况下，wrapper 会先读取 `$HOME\.claude\settings.json` 里的 `env` 配置并写入当前进程，再清理与 `ANTHROPIC_AUTH_TOKEN` 冲突的 `ANTHROPIC_API_KEY`。这可以避免父 shell 里残留的旧 `ANTHROPIC_*` 环境变量把请求路由到错误 provider 或模型。
 
 ## 协作模式
 
