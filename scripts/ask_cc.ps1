@@ -66,6 +66,59 @@ function Resolve-ContextPath {
   return [System.IO.Path]::GetFullPath($clean)
 }
 
+function Test-IsPathInside {
+  param(
+    [string]$ChildPath,
+    [string]$ParentPath
+  )
+
+  $parentFull = [System.IO.Path]::GetFullPath($ParentPath).TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+  $childFull = [System.IO.Path]::GetFullPath($ChildPath)
+  if ($childFull.Equals($parentFull, [System.StringComparison]::OrdinalIgnoreCase)) {
+    return $true
+  }
+
+  $parentPrefix = $parentFull + [System.IO.Path]::DirectorySeparatorChar
+  return $childFull.StartsWith($parentPrefix, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Copy-ContextFileForClaude {
+  param(
+    [string]$WorkspaceRoot,
+    [string]$ResolvedPath,
+    [int]$Index
+  )
+
+  if (-not (Test-Path -LiteralPath $ResolvedPath -PathType Leaf)) {
+    return [pscustomobject]@{
+      Path = $ResolvedPath
+      Note = "missing"
+    }
+  }
+
+  if (Test-IsPathInside -ChildPath $ResolvedPath -ParentPath $WorkspaceRoot) {
+    return [pscustomobject]@{
+      Path = $ResolvedPath
+      Note = "workspace"
+    }
+  }
+
+  $contextDir = Join-Path $WorkspaceRoot "build\tmp\ccc-collaboration\context"
+  New-Item -ItemType Directory -Force -Path $contextDir | Out-Null
+  $fileName = [System.IO.Path]::GetFileName($ResolvedPath)
+  $safeName = $fileName -replace '[^\w.\-]+', '_'
+  if ([string]::IsNullOrWhiteSpace($safeName)) {
+    $safeName = "context-file"
+  }
+  $destination = Join-Path $contextDir ("{0:D2}-{1}" -f $Index, $safeName)
+  Copy-Item -LiteralPath $ResolvedPath -Destination $destination -Force
+
+  return [pscustomobject]@{
+    Path = [System.IO.Path]::GetFullPath($destination)
+    Note = "mirrored from $ResolvedPath"
+  }
+}
+
 function Get-ScriptRoot {
   if ($PSScriptRoot) {
     return $PSScriptRoot
@@ -339,10 +392,12 @@ try {
 
   if ($File.Count -gt 0) {
     $prompt += "`n`nPriority files to inspect first:"
+    $fileIndex = 0
     foreach ($item in $File) {
       $resolved = Resolve-ContextPath -WorkspaceRoot $workspaceRoot -Path $item
-      $status = if (Test-Path -LiteralPath $resolved) { "exists" } else { "missing" }
-      $prompt += "`n- $resolved ($status)"
+      $fileIndex++
+      $accessible = Copy-ContextFileForClaude -WorkspaceRoot $workspaceRoot -ResolvedPath $resolved -Index $fileIndex
+      $prompt += "`n- $($accessible.Path) ($($accessible.Note))"
     }
   }
 

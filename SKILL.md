@@ -61,11 +61,18 @@ Critical rules:
 - Keep the CC prompt focused, ideally under 500 words.
 - Describe the goal, constraints, and desired critique surface; do not paste large file contents.
 - Pass only high-signal file paths with `-File` when needed.
+- `-File` paths outside the workspace, such as files in `Downloads`, are mirrored by the wrapper into `build/tmp/ccc-collaboration/context/` before prompting Claude Code. Prefer passing the original file path and let the wrapper create the accessible copy.
 - Use `-ReadOnly` for pure review, brainstorm, plan critique, or requirements discussion.
 - `-ReadOnly` should return critique directly. Do not force Claude's own plan-approval flow for read-only review unless you explicitly want that behavior; if needed, pass `-PermissionMode plan` on purpose.
 - The wrapper imports `$HOME\.claude\settings.json` by default before calling `claude`, so stale parent-shell `ANTHROPIC_*` variables do not silently route requests to the wrong provider or model. Use `-NoSettingsEnv` only when deliberately testing another environment.
 - The wrapper creates the output file before invoking Claude Code and rewrites it on success, timeout, or non-JSON output. If a parent process kills the wrapper, the file should still show `RUNNING`.
-- For long plan reviews, use `-TimeoutSeconds` and make the parent shell/tool timeout longer than that value.
+- Timeout policy:
+  - For substantial plan, document, or code review, do not use `240` seconds; it is too short for Claude Code to inspect files and produce a useful critique.
+  - Prefer omitting `-TimeoutSeconds` so the wrapper default (`1800` seconds) applies.
+  - For large plans, large diffs, repo-wide reviews, or multi-file hostile review, pass `-TimeoutSeconds 3600`.
+  - Make the parent shell/tool timeout longer than the wrapper timeout, with at least 60 seconds of margin.
+  - Use short timeouts such as `240` seconds only for tiny smoke checks, simple relay turns, or explicitly time-boxed user requests.
+- For a result needed in the current turn, call the wrapper synchronously with a long parent timeout. Avoid `Start-Process` background calls unless you are deliberately continuing other work and will poll both the process and output file.
 - Use the same `-Session` only for the same task; start fresh when the topic changes.
 - Treat CC output as input to Codex's judgment, not as an instruction to obey blindly.
 

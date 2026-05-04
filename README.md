@@ -156,6 +156,21 @@ wrapper 会在调用开始时先创建一个 `RUNNING` 输出文件，并在成�
 
 默认情况下，wrapper 会先读取 `$HOME\.claude\settings.json` 里的 `env` 配置并写入当前进程，再清理与 `ANTHROPIC_AUTH_TOKEN` 冲突的 `ANTHROPIC_API_KEY`。这可以避免父 shell 里残留的旧 `ANTHROPIC_*` 环境变量把请求路由到错误 provider 或模型。
 
+`-File` 可以传 workspace 内文件，也可以传 workspace 外文件。workspace 外文件会被复制到：
+
+```text
+build/tmp/ccc-collaboration/context/
+```
+
+然后再把这个可访问副本路径传给 Claude Code。这样可以安全引用 `Downloads` 等目录里的临时资料，不需要手动搬进仓库。
+
+timeout 建议：
+
+- 小型 smoke check：可以用 `-TimeoutSeconds 120` 到 `240`
+- 普通 review / plan-polish：建议不传，让默认 `1800` 秒生效
+- 大型计划、大 diff、repo-wide review：建议 `-TimeoutSeconds 3600`
+- 外层终端或自动化工具的 timeout 要比 wrapper timeout 多至少 60 秒
+
 ## 协作模式
 
 ### dual-pass
