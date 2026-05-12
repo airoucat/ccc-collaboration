@@ -11,7 +11,7 @@ param(
 
   [string]$Session,
 
-  [string]$Model = "opus",
+  [string]$Model = "pro",
 
   [ValidateSet("low", "medium", "high", "xhigh", "max")]
   [string]$Effort = "max",
@@ -163,6 +163,26 @@ function Import-ClaudeSettingsEnv {
 
   if ($settings.env.ANTHROPIC_AUTH_TOKEN) {
     Remove-Item Env:ANTHROPIC_API_KEY -ErrorAction SilentlyContinue
+  }
+}
+
+function Resolve-ClaudeModel {
+  param([string]$ModelName)
+
+  $normalized = $ModelName.Trim().ToLowerInvariant()
+  switch ($normalized) {
+    "pro" { return "deepseek-v4-pro[1m]" }
+    "ds-pro" { return "deepseek-v4-pro[1m]" }
+    "deepseek-pro" { return "deepseek-v4-pro[1m]" }
+    "v4-pro" { return "deepseek-v4-pro[1m]" }
+    "flash" { return "deepseek-v4-flash" }
+    "ds-flash" { return "deepseek-v4-flash" }
+    "deepseek-flash" { return "deepseek-v4-flash" }
+    "v4-flash" { return "deepseek-v4-flash" }
+    "opus" { return "deepseek-v4-pro[1m]" }
+    "sonnet" { return "deepseek-v4-pro[1m]" }
+    "haiku" { return "deepseek-v4-flash" }
+    default { return $ModelName }
   }
 }
 
@@ -379,6 +399,10 @@ try {
     Import-ClaudeSettingsEnv
   }
 
+  $requestedModel = $Model
+  $resolvedModel = Resolve-ClaudeModel -ModelName $requestedModel
+  $modelDisplay = if ($resolvedModel -eq $requestedModel) { $resolvedModel } else { "$requestedModel -> $resolvedModel" }
+
   $workspaceRoot = Resolve-WorkspacePath $Workspace
   if (-not (Test-Path -LiteralPath $workspaceRoot -PathType Container)) {
     throw "Workspace does not exist: $workspaceRoot"
@@ -406,7 +430,7 @@ try {
   $claudeArgs = @(
     "-p",
     "--output-format", "json",
-    "--model", $Model,
+    "--model", $resolvedModel,
     "--effort", $Effort
   )
 
@@ -463,7 +487,7 @@ try {
     Write-OutputMarkdown `
       -Path $script:OutputPath `
       -SessionId "" `
-      -ModelName $Model `
+      -ModelName $modelDisplay `
       -EffortLevel $Effort `
       -Permission $effectivePermissionMode `
       -IsReadOnly $ReadOnly.IsPresent `
@@ -484,7 +508,7 @@ try {
     Write-OutputMarkdown `
       -Path $script:OutputPath `
       -SessionId "" `
-      -ModelName $Model `
+      -ModelName $modelDisplay `
       -EffortLevel $Effort `
       -Permission $effectivePermissionMode `
       -IsReadOnly $ReadOnly.IsPresent `
@@ -506,7 +530,7 @@ try {
   Write-OutputMarkdown `
     -Path $script:OutputPath `
     -SessionId $result.session_id `
-    -ModelName $Model `
+    -ModelName $modelDisplay `
     -EffortLevel $Effort `
     -Permission $effectivePermissionMode `
     -IsReadOnly $ReadOnly.IsPresent `
@@ -527,10 +551,11 @@ catch {
   if (-not [string]::IsNullOrWhiteSpace($script:OutputPath)) {
     $terminalStatus = Get-OutputStatus -Path $script:OutputPath
     if ($terminalStatus -notin @("OK", "ERROR", "TIMEOUT", "NO_JSON")) {
+      $errorModelName = if (-not [string]::IsNullOrWhiteSpace($modelDisplay)) { $modelDisplay } else { $Model }
       Write-OutputMarkdown `
         -Path $script:OutputPath `
         -SessionId "" `
-        -ModelName $Model `
+        -ModelName $errorModelName `
         -EffortLevel $Effort `
         -Permission "" `
         -IsReadOnly $ReadOnly.IsPresent `

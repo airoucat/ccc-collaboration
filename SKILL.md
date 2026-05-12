@@ -44,7 +44,7 @@ It also follows broader multi-agent orchestration lessons:
 Prefer the bundled wrapper when asking Claude Code for a bounded response:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File C:\Users\xuany\.codex\skills\ccc-collaboration\scripts\ask_cc.ps1 "Review this plan for missing constraints and sequencing risks." -Workspace .
+powershell -ExecutionPolicy Bypass -File C:\Users\xuany\.codex\skills\ccc-collaboration\scripts\ask_cc.ps1 "Review this plan for missing constraints and sequencing risks." -Workspace . -Model pro
 ```
 
 The wrapper prints:
@@ -65,6 +65,7 @@ Critical rules:
 - Use `-ReadOnly` for pure review, brainstorm, plan critique, or requirements discussion.
 - `-ReadOnly` should return critique directly. Do not force Claude's own plan-approval flow for read-only review unless you explicitly want that behavior; if needed, pass `-PermissionMode plan` on purpose.
 - The wrapper imports `$HOME\.claude\settings.json` by default before calling `claude`, so stale parent-shell `ANTHROPIC_*` variables do not silently route requests to the wrong provider or model. Use `-NoSettingsEnv` only when deliberately testing another environment.
+- Prefer DeepSeek model names when choosing a model: `-Model pro` resolves to `deepseek-v4-pro[1m]`, and `-Model flash` resolves to `deepseek-v4-flash`. The old Claude tier names remain compatible (`opus`/`sonnet` -> Pro, `haiku` -> Flash), but do not use them in new examples.
 - The wrapper creates the output file before invoking Claude Code and rewrites it on success, timeout, or non-JSON output. If a parent process kills the wrapper, the file should still show `RUNNING`.
 - Timeout policy:
   - For substantial plan, document, or code review, do not use `240` seconds; it is too short for Claude Code to inspect files and produce a useful critique.

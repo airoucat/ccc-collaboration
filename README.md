@@ -144,7 +144,7 @@ powershell -ExecutionPolicy Bypass -File $HOME\.codex\skills\ccc-collaboration\s
 - `-Workspace`：目标仓库路径，默认当前目录。
 - `-File`：传给 CC 优先查看的文件路径，可重复或传数组。
 - `-Session`：继续已有 Claude Code session。
-- `-Model`：默认 `opus`。
+- `-Model`：默认 `pro`，会解析为 `deepseek-v4-pro[1m]`；也可以传 `flash`，解析为 `deepseek-v4-flash`。
 - `-Effort`：默认 `max`。
 - `-ReadOnly`：要求 CC 不改文件，只做分析。
 - `-Output`：指定输出 markdown 文件路径。
@@ -155,6 +155,14 @@ powershell -ExecutionPolicy Bypass -File $HOME\.codex\skills\ccc-collaboration\s
 wrapper 会在调用开始时先创建一个 `RUNNING` 输出文件，并在成功、超时或非 JSON 输出时改写它。这样即使 CC 调用很慢，也能看到当前状态。注意：如果外层工具自己的 timeout 比 `-TimeoutSeconds` 更短，外层仍然可能先杀掉进程；这种情况下请调大外层 timeout。
 
 默认情况下，wrapper 会先读取 `$HOME\.claude\settings.json` 里的 `env` 配置并写入当前进程，再清理与 `ANTHROPIC_AUTH_TOKEN` 冲突的 `ANTHROPIC_API_KEY`。这可以避免父 shell 里残留的旧 `ANTHROPIC_*` 环境变量把请求路由到错误 provider 或模型。
+
+模型选择使用 DeepSeek 语义：
+
+- `-Model pro` / `-Model ds-pro` / `-Model deepseek-v4-pro[1m]` -> `deepseek-v4-pro[1m]`
+- `-Model flash` / `-Model ds-flash` / `-Model deepseek-v4-flash` -> `deepseek-v4-flash`
+- 旧 Claude tier 名仍兼容：`opus`、`sonnet` 映射到 Pro，`haiku` 映射到 Flash。
+
+建议默认用 `pro`，只有小型 relay、快速改写、低风险摘要或显式省成本时才用 `flash`。
 
 `-File` 可以传 workspace 内文件，也可以传 workspace 外文件。workspace 外文件会被复制到：
 
